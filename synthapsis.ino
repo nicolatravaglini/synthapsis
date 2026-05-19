@@ -259,6 +259,7 @@ void updateControl() {
     if (!isLoop) {
       nextNote();
       lastNotes.enqueue(currentNote);
+      loopNoteIndex = 0;
     } else {
       currentNote = (Note)lastNotes.getIndexValue(loopNoteIndex);
       loopNoteIndex = (loopNoteIndex + 1) % lastNotes.length;
