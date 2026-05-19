@@ -6,40 +6,70 @@
 class CircularArray {
   private:
     int array[256];
-    int len;
     int start_index;
     int end_index;
   
   public:
+    int length;
+    
     CircularArray(int length) {
       if (length > 256) length = 256;
       else if (length < 1) length = 1;
       
-      len = length;
-      start_index = 0;
-      end_index = len-1;
+      this->length = length;
+      this->start_index = 0;
+      this->end_index = this->length-1;
     }
 
     void fillArray(int value) {
-      for (int i=0; i<len; i++) {
-        array[i] = value;
+      for (int i=0; i<this->length; i++) {
+        this->array[i] = value;
       }
     }
 
     void enqueue(int value) {
-      start_index = (start_index + 1) % len;
-      end_index = (end_index + 1) % len;
-      array[end_index] = value;
+      this->start_index = (this->start_index + 1) % this->length;
+      this->end_index = (this->end_index + 1) % this->length;
+      this->array[this->end_index] = value;
     }
 
     int getIndexValue(int index) {
-      if (index < 0 || index >= len) return -1;
-      return array[(start_index + index) % len];
+      if (index < 0 || index >= this->length) return -1;
+      return this->array[(this->start_index + index) % this->length];
+    }
+};
+
+class ToggleButton {
+  private:
+    int pin;
+    bool toggleState;
+    bool lastButtonState;
+
+  public:
+    ToggleButton(int pin) {
+      this->pin = pin;
+      this->toggleState = false;
+      this->lastButtonState = LOW;
+    }
+
+    void begin() {
+      pinMode(pin, INPUT_PULLDOWN);
+    }
+
+    bool update() {
+      bool currentButtonState = digitalRead(pin);
+      if (currentButtonState == HIGH && this->lastButtonState == LOW) {
+        this->toggleState = !this->toggleState;
+      }
+      this->lastButtonState = currentButtonState;
+      return this->toggleState;
     }
 };
 
 // Hardware
 const int BPM_POT_PIN = 34;
+const int LOOP_LED_PIN = 33;
+const int LOOP_BTN_PIN = 32;
 
 // Consts
 enum NOTES {
@@ -70,10 +100,13 @@ EventDelay noteDuration;
 
 // Vars
 int currentNote;
-CircularArray lastNotes(8);
+CircularArray lastNotes(16);
 float markovMatrix[NUM_NOTES][NUM_NOTES] = {0};
 int bpm;
-int volume;
+float volume;
+bool isLoop;
+int loopNoteIndex;
+ToggleButton loopBtn(LOOP_BTN_PIN);
 
 void nextNote() {
   float randomNumber = (float) esp_random() / (float) UINT32_MAX;
@@ -103,10 +136,15 @@ void setBpm() {
 }
 
 void setup() {
+  pinMode(LOOP_LED_PIN, OUTPUT);
+  loopBtn.begin();
+
   currentNote = DO;
   lastNotes.fillArray(REST);
   bpm = 100;
-  volume = 2;
+  volume = 1.5;
+  isLoop = false;
+  loopNoteIndex = 0;
 
   markovMatrix[DO][RE] = 0.40;
   markovMatrix[DO][MI] = 0.20;
@@ -166,11 +204,20 @@ void setup() {
 }
 
 void updateControl() {
+  isLoop = loopBtn.update();
+
+  digitalWrite(LOOP_LED_PIN, isLoop ? HIGH : LOW);
+
   if (noteDuration.ready()) {
-    nextNote();
-    playCurrentNote();
-    lastNotes.enqueue(currentNote);
+    if (!isLoop) {
+      nextNote();
+      lastNotes.enqueue(currentNote);
+    } else {
+      currentNote = lastNotes.getIndexValue(loopNoteIndex);
+      loopNoteIndex = (loopNoteIndex + 1) % lastNotes.length;
+    }
     setBpm();
+    playCurrentNote();
     noteDuration.start();
   }
 }
