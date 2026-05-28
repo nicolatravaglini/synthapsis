@@ -5,53 +5,16 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Adafruit_MCP23X17.h>
 
-class CircularArray {
-  private:
-    int array[256];
-    int start_index;
-    int end_index;
-  
-  public:
-    int length;
-    
-    CircularArray(int length) {
-      if (length > 256) length = 256;
-      else if (length < 1) length = 1;
-      
-      this->length = length;
-      this->start_index = 0;
-      this->end_index = this->length-1;
-    }
-
-    void fillArray(int value) {
-      for (int i=0; i<this->length; i++) {
-        this->array[i] = value;
-      }
-    }
-
-    void enqueue(int value) {
-      this->start_index = (this->start_index + 1) % this->length;
-      this->end_index = (this->end_index + 1) % this->length;
-      this->array[this->end_index] = value;
-    }
-
-    int getIndexValue(int index) {
-      if (index < 0 || index >= this->length) return -1;
-      return this->array[(this->start_index + index) % this->length];
-    }
-};
-
-class ToggleButton {
+class Button {
   private:
     int pin;
-    bool toggleState;
     bool lastButtonState;
 
   public:
-    ToggleButton(int pin) {
+    Button(int pin) {
       this->pin = pin;
-      this->toggleState = false;
       this->lastButtonState = LOW;
     }
 
@@ -61,11 +24,9 @@ class ToggleButton {
 
     bool update() {
       bool currentButtonState = digitalRead(pin);
-      if (currentButtonState == HIGH && this->lastButtonState == LOW) {
-        this->toggleState = !this->toggleState;
-      }
+      bool wasPressed = (currentButtonState == HIGH && this->lastButtonState == LOW);
       this->lastButtonState = currentButtonState;
-      return this->toggleState;
+      return wasPressed;
     }
 };
 
@@ -73,8 +34,15 @@ class ToggleButton {
 const int BPM_POT_PIN = 34;
 const int LOOP_LED_PIN = 33;
 const int LOOP_BTN_PIN = 32;
+const int I2C_SDA_PIN = 21;
+const int I2C_SCL_PIN = 22;
+
 const int DISPLAY_WIDTH = 128;
 const int DISPLAY_HEIGHT = 64;
+
+const int DISPLAY_ADDR = 0x3C;
+const int MCP1_ADDR = 0x27;
+const int MCP2_ADDR = 0x26;
 
 // Consts
 enum Note {
@@ -99,20 +67,24 @@ Oscil <SIN2048_NUM_CELLS, AUDIO_RATE> aSin(SIN2048_DATA);
 const int UPDATE_CONTROL_FREQ = 64;
 const int MIN_BPM = 50;
 const int MAX_BPM = 1000;
+const int BAR_LENGTH = 16;
 
 // Effects
 EventDelay noteDuration;
 
 // Vars
 Note currentNote;
-CircularArray lastNotes(16);
 float markovMatrix[NUM_NOTES][NUM_NOTES];
 int bpm;
 float volume;
 bool isLoop;
-int loopNoteIndex;
-ToggleButton loopBtn(LOOP_BTN_PIN);
+bool triggeredLoop;
+Note barNotes[BAR_LENGTH];
+int barIndex;
+Button loopBtn(LOOP_BTN_PIN);
 Adafruit_SSD1306 display(DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire, -1);
+Adafruit_MCP23X17 mcp1;
+Adafruit_MCP23X17 mcp2;
 
 void nextNote() {
   float randomNumber = (float) esp_random() / (float) UINT32_MAX;
@@ -195,81 +167,114 @@ void displayBpm() {
   display.print(bpm);
 }
 
+void displayBarIndex() {
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  int digits = ((int)log10(barIndex+1) + 1) + ((int)log10(BAR_LENGTH) + 1);
+  int textWidth = (1 + digits) * 6;
+  display.setCursor(2, 54); 
+  display.print(barIndex+1);
+  display.print("/");
+  display.print(BAR_LENGTH);
+}
+
 void setup() {
+  // Env begins
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Serial.begin(115200);
+
   // Init loop led and button
   pinMode(LOOP_LED_PIN, OUTPUT);
   loopBtn.begin();
 
   // Init display
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    for(;;);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, DISPLAY_ADDR)) {
+    Serial.println(F("SSD1306 initialization failed"));
+    while (1);
   }
   display.clearDisplay();
+
+  // Init MCPs
+  if (!mcp1.begin_I2C(MCP1_ADDR)) {
+    Serial.println("MCP1 initialization failed");
+    while (1);
+  }
+
+  if (!mcp2.begin_I2C(MCP2_ADDR)) {
+    Serial.println("MCP2 initialization failed");
+    while (1);
+  }
   
-  currentNote = DO;
-  lastNotes.fillArray(REST);
+  // Init vars
+  currentNote = FA_SHARP;
   bpm = 100;
   volume = 1.5;
   isLoop = false;
-  loopNoteIndex = 0;
+  triggeredLoop = false;
+  for (int i=0; i<BAR_LENGTH; i++) barNotes[i] = REST;
+  barIndex = 0;
 
+  // Init Markov matrix
   for (int i=0; i<NUM_NOTES; i++) {
     for (int j=0; j<NUM_NOTES; j++) {
       markovMatrix[i][j] = 0.0;
     }
   }
 
-  markovMatrix[DO][DO] = 0.40;
-  markovMatrix[DO][REST] = 0.50;
-  markovMatrix[DO][RE] = 0.10;
-  
-  markovMatrix[RE][MI] = 1.00;
-  markovMatrix[MI][FA] = 1.00;
+  markovMatrix[FA_SHARP][MI] = 0.90;
+  markovMatrix[FA_SHARP][REST] = 0.10;
 
-  markovMatrix[FA][FA] = 0.40;
-  markovMatrix[FA][REST] = 0.40;
-  markovMatrix[FA][SOL] = 0.20;
+  markovMatrix[MI][RE] = 0.90;
+  markovMatrix[MI][REST] = 0.10;
 
-  markovMatrix[SOL][FA] = 0.50;
-  markovMatrix[SOL][MI] = 0.40;
-  markovMatrix[SOL][REST] = 0.10;
+  markovMatrix[RE][DO_SHARP] = 0.90;
+  markovMatrix[RE][REST] = 0.10;
 
-  markovMatrix[MI][FA] = 1.00;
+  markovMatrix[DO_SHARP][FA_SHARP] = 0.80;
+  markovMatrix[DO_SHARP][REST] = 0.20;
 
-  markovMatrix[REST][REST] = 0.70;
-  markovMatrix[REST][DO] = 0.25;
-  markovMatrix[REST][FA] = 0.05;
+  markovMatrix[REST][FA_SHARP] = 1.00;
 
   startMozzi(UPDATE_CONTROL_FREQ);
   setBpm();
 
   noteDuration.start();
   playCurrentNote();
-
-  Serial.begin(115200);
 }
 
 void updateControl() {
-  isLoop = loopBtn.update();
+  if (loopBtn.update()) {
+    triggeredLoop = !triggeredLoop;
+  }
 
-  digitalWrite(LOOP_LED_PIN, isLoop ? HIGH : LOW);
+  digitalWrite(LOOP_LED_PIN, isLoop);
 
   if (noteDuration.ready()) {
+    barIndex = (barIndex + 1) % BAR_LENGTH;
+
+    if (triggeredLoop && barIndex == 0) {
+      isLoop = !isLoop;
+      triggeredLoop = false;
+    } else if (triggeredLoop) {
+      digitalWrite(LOOP_LED_PIN, !isLoop);
+    }
+
     if (!isLoop) {
       nextNote();
-      lastNotes.enqueue(currentNote);
-      loopNoteIndex = 0;
+      barNotes[barIndex] = currentNote;
     } else {
-      currentNote = (Note)lastNotes.getIndexValue(loopNoteIndex);
-      loopNoteIndex = (loopNoteIndex + 1) % lastNotes.length;
+      currentNote = barNotes[barIndex];
     }
+
     setBpm();
+    
     display.clearDisplay();
     displayCurrentNote();
     displayIsLoop();
     displayBpm();
+    displayBarIndex();
     display.display();
+    
     playCurrentNote();
     noteDuration.start();
   }
