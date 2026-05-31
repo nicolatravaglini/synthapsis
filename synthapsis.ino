@@ -44,6 +44,9 @@ const int DISPLAY_ADDR = 0x3C;
 const int MCP1_ADDR = 0x27;
 const int MCP2_ADDR = 0x26;
 
+// Mutex
+portMUX_TYPE matrixMux = portMUX_INITIALIZER_UNLOCKED;
+
 // Consts
 enum Note {
   DO,
@@ -178,9 +181,68 @@ void displayBarIndex() {
   display.print(BAR_LENGTH);
 }
 
+void updateDisplay() {
+  display.clearDisplay();
+  displayCurrentNote();
+  displayIsLoop();
+  displayBpm();
+  displayBarIndex();
+  display.display();
+}
+
+void updateMarkovMatrix() {
+  // Reset all the mcp1 pins
+  mcp1.writeGPIOAB(0x0000);
+
+  float tmpMatrix[NUM_NOTES][NUM_NOTES];
+
+  for (int i=0; i<NUM_NOTES; i++) {
+    mcp1.writeGPIOAB(1 << i);
+
+    uint16_t mcp2States = mcp2.readGPIOAB();
+    int counter = 0;
+
+    for (int j=0; j<NUM_NOTES; j++) {
+      int linked = (mcp2States >> j) & 0x01;
+      tmpMatrix[i][j] = linked;
+      counter += linked;
+    }
+
+    // Normalize
+    if (counter > 0) {
+      float invCounter = 1.0 / (float)counter;
+      for (int j=0; j<NUM_NOTES; j++) tmpMatrix[i][j] *= invCounter;
+    } else {
+      // Fallback to REST if nothing is connected
+      tmpMatrix[i][REST] = 1;
+    }
+  }
+
+  // Update the real Markov matrix
+  portENTER_CRITICAL(&matrixMux);
+  for(int i=0; i<NUM_NOTES; i++) {
+    for(int j=0; j<NUM_NOTES; j++) {
+      markovMatrix[i][j] = tmpMatrix[i][j];
+    }
+  }
+  portEXIT_CRITICAL(&matrixMux);
+
+  mcp1.writeGPIOAB(0x0000);
+}
+
+void hardwareUpdateTask(void* pvParameters) {
+  while (true) {
+    updateMarkovMatrix();
+    setBpm();
+    updateDisplay();
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
 void setup() {
   // Env begins
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Wire.setClock(400000);
   Serial.begin(115200);
 
   // Init loop led and button
@@ -204,9 +266,14 @@ void setup() {
     Serial.println("MCP2 initialization failed");
     while (1);
   }
+
+  for (int i=0; i<NUM_NOTES; i++) {
+    mcp1.pinMode(i, OUTPUT);
+    mcp2.pinMode(i, INPUT);
+  }
   
   // Init vars
-  currentNote = FA_SHARP;
+  currentNote = REST;
   bpm = 100;
   volume = 1.5;
   isLoop = false;
@@ -221,22 +288,9 @@ void setup() {
     }
   }
 
-  markovMatrix[FA_SHARP][MI] = 0.90;
-  markovMatrix[FA_SHARP][REST] = 0.10;
-
-  markovMatrix[MI][RE] = 0.90;
-  markovMatrix[MI][REST] = 0.10;
-
-  markovMatrix[RE][DO_SHARP] = 0.90;
-  markovMatrix[RE][REST] = 0.10;
-
-  markovMatrix[DO_SHARP][FA_SHARP] = 0.80;
-  markovMatrix[DO_SHARP][REST] = 0.20;
-
-  markovMatrix[REST][FA_SHARP] = 1.00;
+  xTaskCreatePinnedToCore(hardwareUpdateTask, "HW_Task", 10000, NULL, 1, NULL, 0);
 
   startMozzi(UPDATE_CONTROL_FREQ);
-  setBpm();
 
   noteDuration.start();
   playCurrentNote();
@@ -260,20 +314,14 @@ void updateControl() {
     }
 
     if (!isLoop) {
+      portENTER_CRITICAL(&matrixMux);
       nextNote();
+      portEXIT_CRITICAL(&matrixMux);
+
       barNotes[barIndex] = currentNote;
     } else {
       currentNote = barNotes[barIndex];
     }
-
-    setBpm();
-    
-    display.clearDisplay();
-    displayCurrentNote();
-    displayIsLoop();
-    displayBpm();
-    displayBarIndex();
-    display.display();
     
     playCurrentNote();
     noteDuration.start();
