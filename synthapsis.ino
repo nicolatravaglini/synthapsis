@@ -34,6 +34,7 @@ class Button {
 const int BPM_POT_PIN = 34;
 const int LOOP_LED_PIN = 33;
 const int LOOP_BTN_PIN = 32;
+const int PAUSE_BTN_PIN = 4;
 const int I2C_SDA_PIN = 21;
 const int I2C_SCL_PIN = 22;
 
@@ -82,9 +83,11 @@ int bpm;
 float volume;
 bool isLoop;
 bool triggeredLoop;
+bool isPause;
 Note barNotes[BAR_LENGTH];
 int barIndex;
 Button loopBtn(LOOP_BTN_PIN);
+Button pauseBtn(PAUSE_BTN_PIN);
 Adafruit_SSD1306 display(DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire, -1);
 Adafruit_MCP23X17 mcp1;
 Adafruit_MCP23X17 mcp2;
@@ -159,13 +162,22 @@ void displayIsLoop() {
   display.print(" L ");
 }
 
+void displayIsPause() {
+  if (isPause) {
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(DISPLAY_WIDTH - 3 * 6, 0);
+    display.print(" P ");
+  }
+}
+
 void displayBpm() {
   display.setTextSize(1);
   display.setTextColor(WHITE);
   int digits = (int)log10(bpm) + 1;
   int textWidth = (5 + digits) * 6;
   int x = DISPLAY_WIDTH - textWidth - 2;
-  display.setCursor(x, 54); 
+  display.setCursor(x, 54);
   display.print("BPM: ");
   display.print(bpm);
 }
@@ -185,6 +197,7 @@ void updateDisplay() {
   display.clearDisplay();
   displayCurrentNote();
   displayIsLoop();
+  displayIsPause();
   displayBpm();
   displayBarIndex();
   display.display();
@@ -235,7 +248,7 @@ void hardwareUpdateTask(void* pvParameters) {
     updateMarkovMatrix();
     setBpm();
     updateDisplay();
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
@@ -278,6 +291,7 @@ void setup() {
   volume = 1.5;
   isLoop = false;
   triggeredLoop = false;
+  isPause = true;
   for (int i=0; i<BAR_LENGTH; i++) barNotes[i] = REST;
   barIndex = 0;
 
@@ -301,9 +315,14 @@ void updateControl() {
     triggeredLoop = !triggeredLoop;
   }
 
+  if (pauseBtn.update()) {
+    isPause = !isPause;
+    barIndex = 0;
+  }
+
   digitalWrite(LOOP_LED_PIN, isLoop);
 
-  if (noteDuration.ready()) {
+  if (noteDuration.ready() && !isPause) {
     barIndex = (barIndex + 1) % BAR_LENGTH;
 
     if (triggeredLoop && barIndex == 0) {
@@ -329,7 +348,7 @@ void updateControl() {
 }
 
 int updateAudio() {
-  if (currentNote == REST) {
+  if (currentNote == REST || isPause) {
     return 0;
   }
   // FIXME: not handled correctly.
