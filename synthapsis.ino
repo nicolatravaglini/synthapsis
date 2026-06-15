@@ -1,7 +1,12 @@
 #include <MozziGuts.h>
 #include <Oscil.h>
 #include <tables/sin2048_int8.h>
+#include <tables/saw2048_int8.h>
+#include <tables/triangle2048_int8.h>
 #include <EventDelay.h>
+#include <ADSR.h>
+#include <AudioDelay.h>
+#include <LowPassFilter.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -68,13 +73,19 @@ enum Note {
 };
 const int NOTES_FREQ[] = {262, 277, 294, 311, 330, 349, 370, 392, 415, 440, 466, 494, 0};
 Oscil <SIN2048_NUM_CELLS, AUDIO_RATE> aSin(SIN2048_DATA);
+// Oscil <SAW2048_NUM_CELLS, AUDIO_RATE> aSin(SAW2048_DATA);
+// Oscil <TRIANGLE2048_NUM_CELLS, AUDIO_RATE> aSin(TRIANGLE2048_DATA);
 const int UPDATE_CONTROL_FREQ = 64;
 const int MIN_BPM = 50;
-const int MAX_BPM = 1000;
+const int MAX_BPM = 210;
 const int BAR_LENGTH = 16;
 
 // Effects
 EventDelay noteDuration;
+ADSR <UPDATE_CONTROL_FREQ, AUDIO_RATE> envelope;
+AudioDelay<16384, int> aDelay; 
+LowPassFilter lpf;
+int reverbLevel;
 
 // Vars
 Note currentNote;
@@ -92,6 +103,10 @@ Adafruit_SSD1306 display(DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire, -1);
 Adafruit_MCP23X17 mcp1;
 Adafruit_MCP23X17 mcp2;
 
+int lastBpm = -1;
+bool lastPause = false;
+int lastBarIndex = -1;
+
 void nextNote() {
   float randomNumber = (float) esp_random() / (float) UINT32_MAX;
   // Get random note using CDF
@@ -108,14 +123,16 @@ void nextNote() {
 void playCurrentNote() {
   if (currentNote != REST) {
     aSin.setFreq(NOTES_FREQ[currentNote]);
+    envelope.noteOn();
+  } else {
+    envelope.noteOff();
   }
 }
 
 void setBpm() {
   int bpmPotValue = analogRead(BPM_POT_PIN);
-  float normalized = (float)bpmPotValue / 4095.0;
-  float cubed = normalized * normalized * normalized;
-  bpm = (cubed * (MAX_BPM - MIN_BPM)) + MIN_BPM;
+  bpm = map(bpmPotValue, 0, 4095, MIN_BPM, MAX_BPM);
+  if (bpm == MAX_BPM) bpm = 1000;
   noteDuration.set(60000 / bpm);
 }
 
@@ -247,8 +264,13 @@ void hardwareUpdateTask(void* pvParameters) {
   while (true) {
     updateMarkovMatrix();
     setBpm();
-    updateDisplay();
-    vTaskDelay(pdMS_TO_TICKS(50));
+    if (bpm != lastBpm || isPause != lastPause || barIndex != lastBarIndex) {
+      updateDisplay();
+      lastBpm = bpm;
+      lastPause = isPause;
+      lastBarIndex = barIndex;
+    }
+    vTaskDelay(pdMS_TO_TICKS(150));
   }
 }
 
@@ -288,12 +310,13 @@ void setup() {
   // Init vars
   currentNote = REST;
   bpm = 100;
-  volume = 1.5;
+  volume = 1;
   isLoop = false;
   triggeredLoop = false;
   isPause = true;
   for (int i=0; i<BAR_LENGTH; i++) barNotes[i] = REST;
   barIndex = 0;
+  reverbLevel = 255;
 
   // Init Markov matrix
   for (int i=0; i<NUM_NOTES; i++) {
@@ -302,8 +325,13 @@ void setup() {
     }
   }
 
-  xTaskCreatePinnedToCore(hardwareUpdateTask, "HW_Task", 10000, NULL, 1, NULL, 0);
+  envelope.setADLevels(255, 127);
+  envelope.setTimes(20, 100, 10000, 200);
+  lpf.setCutoffFreq(100);
+  lpf.setResonance(0);
 
+  xTaskCreatePinnedToCore(hardwareUpdateTask, "HW_Task", 10000, NULL, 1, NULL, 0);
+  
   startMozzi(UPDATE_CONTROL_FREQ);
 
   noteDuration.start();
@@ -345,14 +373,39 @@ void updateControl() {
     playCurrentNote();
     noteDuration.start();
   }
+
+  envelope.update();
 }
 
 int updateAudio() {
-  if (currentNote == REST || isPause) {
-    return 0;
+  int envValue = envelope.next(); 
+  int asig = (aSin.next() * envValue) >> 8;
+  asig = (int)(asig * volume);
+
+  if (isPause) {
+    asig = 0;
   }
-  // FIXME: not handled correctly.
-  return (int) (aSin.next() * volume);
+
+  static int feedback = 0;
+  
+  // Divide input by 4 to leave headroom for feedback buildup
+  int delayInput = (asig >> 2) + feedback; 
+  int delayedSignal = aDelay.next(delayInput, 8192);
+  int filteredEcho = lpf.next(delayedSignal);
+  
+  feedback = (filteredEcho * 15) >> 4;
+
+  int rawWet = filteredEcho >> 2;
+  int inverseEnv = 255 - envValue;
+  int duckedReverb = (rawWet * inverseEnv) >> 8;
+  duckedReverb = (duckedReverb * reverbLevel) >> 8;
+
+  return asig + duckedReverb;
+  
+  // if (currentNote == REST || isPause) {
+  //   return 0;
+  // }
+  // return (int) (aSin.next() * volume);
 }
 
 void loop() {
