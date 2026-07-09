@@ -131,7 +131,7 @@ void playCurrentNote() {
 
 void setBpm() {
   int bpmPotValue = analogRead(BPM_POT_PIN);
-  bpm = map(bpmPotValue, 0, 4095, MIN_BPM, MAX_BPM);
+  bpm = map(bpmPotValue, 0, 4095, MAX_BPM, MIN_BPM);
   if (bpm == MAX_BPM) bpm = 1000;
   noteDuration.set(60000 / bpm);
 }
@@ -221,19 +221,17 @@ void updateDisplay() {
 }
 
 void updateMarkovMatrix() {
-  // Reset all the mcp1 pins
-  mcp1.writeGPIOAB(0x0000);
-
   float tmpMatrix[NUM_NOTES][NUM_NOTES];
 
   for (int i=0; i<NUM_NOTES; i++) {
-    mcp1.writeGPIOAB(1 << i);
+    mcp1.pinMode(i, OUTPUT);
+    mcp1.digitalWrite(i, LOW);
 
     uint16_t mcp2States = mcp2.readGPIOAB();
     int counter = 0;
 
     for (int j=0; j<NUM_NOTES; j++) {
-      int linked = (mcp2States >> j) & 0x01;
+      int linked = ((~mcp2States) >> j) & 0x01;
       tmpMatrix[i][j] = linked;
       counter += linked;
     }
@@ -246,6 +244,8 @@ void updateMarkovMatrix() {
       // Fallback to REST if nothing is connected
       tmpMatrix[i][REST] = 1;
     }
+
+    mcp1.pinMode(i, INPUT);
   }
 
   // Update the real Markov matrix
@@ -256,8 +256,6 @@ void updateMarkovMatrix() {
     }
   }
   portEXIT_CRITICAL(&matrixMux);
-
-  mcp1.writeGPIOAB(0x0000);
 }
 
 void hardwareUpdateTask(void* pvParameters) {
@@ -270,7 +268,7 @@ void hardwareUpdateTask(void* pvParameters) {
       lastPause = isPause;
       lastBarIndex = barIndex;
     }
-    vTaskDelay(pdMS_TO_TICKS(150));
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
@@ -303,8 +301,8 @@ void setup() {
   }
 
   for (int i=0; i<NUM_NOTES; i++) {
-    mcp1.pinMode(i, OUTPUT);
-    mcp2.pinMode(i, INPUT);
+    mcp1.pinMode(i, INPUT);
+    mcp2.pinMode(i, INPUT_PULLUP);
   }
   
   // Init vars
