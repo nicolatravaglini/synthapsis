@@ -138,18 +138,18 @@ void setBpm() {
 
 const char* getNoteString(Note note) {
   switch (note) {
-    case DO: return "DO";
-    case DO_SHARP: return "DO#";
-    case RE: return "RE";
-    case RE_SHARP: return "RE#";
-    case MI: return "MI";
-    case FA: return "FA";
-    case FA_SHARP: return "FA#";
-    case SOL: return "SOL";
-    case SOL_SHARP: return "SOL#";
-    case LA: return "LA";
-    case LA_SHARP: return "LA#";
-    case SI: return "SI";
+    case DO: return "C";
+    case DO_SHARP: return "C#";
+    case RE: return "D";
+    case RE_SHARP: return "D#";
+    case MI: return "E";
+    case FA: return "F";
+    case FA_SHARP: return "F#";
+    case SOL: return "G";
+    case SOL_SHARP: return "G#";
+    case LA: return "A";
+    case LA_SHARP: return "A#";
+    case SI: return "B";
     case REST: return "-";
     default: return "";
   }
