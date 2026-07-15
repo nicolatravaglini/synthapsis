@@ -314,7 +314,7 @@ void setup() {
   isPause = true;
   for (int i=0; i<BAR_LENGTH; i++) barNotes[i] = REST;
   barIndex = 0;
-  reverbLevel = 255;
+  reverbLevel = 255; // 0-255
 
   // Init Markov matrix
   for (int i=0; i<NUM_NOTES; i++) {
@@ -323,13 +323,16 @@ void setup() {
     }
   }
 
+  // Init envelope
   envelope.setADLevels(255, 127);
   envelope.setTimes(20, 100, 10000, 200);
   lpf.setCutoffFreq(100);
   lpf.setResonance(0);
 
+  // Start task on core 0
   xTaskCreatePinnedToCore(hardwareUpdateTask, "HW_Task", 10000, NULL, 1, NULL, 0);
   
+  // Start Mozzi
   startMozzi(UPDATE_CONTROL_FREQ);
 
   noteDuration.start();
@@ -376,6 +379,7 @@ void updateControl() {
 }
 
 int updateAudio() {
+  // Get signal of note
   int envValue = envelope.next(); 
   int asig = (aSin.next() * envValue) >> 8;
   asig = (int)(asig * volume);
@@ -386,24 +390,22 @@ int updateAudio() {
 
   static int feedback = 0;
   
-  // Divide input by 4 to leave headroom for feedback buildup
+  // Calculate delay
   int delayInput = (asig >> 2) + feedback; 
   int delayedSignal = aDelay.next(delayInput, 8192);
   int filteredEcho = lpf.next(delayedSignal);
   
+  // Calculate new feedback
   feedback = (filteredEcho * 15) >> 4;
 
+  // Calculate reverb
   int rawWet = filteredEcho >> 2;
   int inverseEnv = 255 - envValue;
   int duckedReverb = (rawWet * inverseEnv) >> 8;
   duckedReverb = (duckedReverb * reverbLevel) >> 8;
 
+  // Add reverb & delay to signal, and return
   return asig + duckedReverb;
-  
-  // if (currentNote == REST || isPause) {
-  //   return 0;
-  // }
-  // return (int) (aSin.next() * volume);
 }
 
 void loop() {
